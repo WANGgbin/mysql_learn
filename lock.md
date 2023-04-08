@@ -69,3 +69,5 @@ SHOW ENGINE INNODB STATUS\G
 该分节详细展示了发生死锁时都有哪些事务，正在执行那条语句，各自占有哪些锁，等待哪些锁，以及最后 InnoDB 决定回滚哪个事务。
 
 需要注意的时，通过上述方式只能查找到最近一次死锁的场景。如果死锁频繁发生，可以打开系统变量 `innodb_print_all_deadlocks`，这样可以在错误日志中查看所有的死锁情况了。
+
+另外，当我们打开系统变量`SET GLOBAL innodb_status_output_locks = ON;` 的时候，通过 `SHOW ENGINE INNODB STATUS\G` 可以查看每个事务详细的加锁情况(只有分配了事务 id 的事务才有记录。只有执行了增删改或者 for update 读的事务才会被分配事务 id)。
