@@ -11,7 +11,7 @@
 
     但是，即便如此，仍然存在磁盘 I/O，还是很影响系统的性能，怎么办呢？
 
-    mysql 引入了 log buf 的概念，log buf 本质就是个内存缓冲区，用来存放 redo log。在必要的时候，才会刷盘。这样会有问题吗？ 比如，redo log 写到了 log buf 但是还没有写入到磁盘，系统宕机了，那么 redo log 岂不是丢失了？
+    mysql 引入了 log buf 的概念，log buf 本质就是个内存缓冲区(大小通过 `innodb_log_buffer_size` 来指定，默认值为 16M)，用来存放 redo log。在必要的时候，才会刷盘。这样会有问题吗？ 比如，redo log 写到了 log buf 但是还没有写入到磁盘，系统宕机了，那么 redo log 岂不是丢失了？
 
     实际上，这不会有什么问题，事务提交之前，如果做的变更丢失了，那就丢失了，相当于事务什么都没做。但是，**如果事务提交了，就会将对应的 redo log 刷新到磁盘中，这样保证了事务的持久性**。那么除了事务提交，还有哪些场景会刷新 redo log 到磁盘呢？
 
@@ -75,3 +75,20 @@
     - 2
 
         将 redo log 写到操作系统的缓冲中。
+
+- 几个重要的 lsn
+
+    - lsn
+
+        最新写入 log buf 的 redo log 的末尾对应的 lsn
+    - flushed_to_disk_lsn
+
+        最新刷新到磁盘的 redo log 末尾对应的 lsn
+
+    - checkpoint_lsn
+
+        最新的无效的 redo log 末尾对应的 lsn
+
+那么如何查看系统当前的上述 lsn 值呢？
+
+通过 `SHOW ENGINE INNODB STATUS;`
