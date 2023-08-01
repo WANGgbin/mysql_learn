@@ -2,6 +2,8 @@
 
 # 用户
 
+如果要表示来自任何主机的用户，则可以使用 % 替换 host_name。
+
 - 定义用户
 
     `create user 'user_name'@'host_name' identified with 'authentication_method' by 'password';`
