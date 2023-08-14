@@ -156,3 +156,16 @@ mysql 支持时间最大精度为 微秒。
     SET time_zone = timezone;
 
 
+# bool 类型
+
+参考：[mysql bool](https://www.yiibai.com/mysql/boolean.html)
+
+mysql 没有提供 bool 类型，但是在创建表的时候，可以指定某个字段的类型为 bool。通过 `desc table` 我们可以看到，bool 底层使用 tinyint 进行存储。
+
+- 查找
+
+    通过 `column = true` 只能查找 val == 1 的记录。实际上所有 val != 0 的值都视为  column = true。我们可以通过 `column is true` 查找所有 val != 0 的列。通过 `column is not true` 或者 `column is false` 查找 val == 0 的列。
+
+- 设置
+
+    更改值可以直接使用 false / true，底层对应的就是 0 / 1。当然可以直接使用数字。
