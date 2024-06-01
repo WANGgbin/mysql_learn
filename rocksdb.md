@@ -2,11 +2,11 @@ rocksdb 是 facebook 开源的一款基于 leveldb 的存储引擎。mysql 也�
 
 # 事务
 
-rocksdb 支持两种事务：悲观事务、乐观事务。
+rocksdb 支持两种事务：悲观事务、乐观事务。关于 rocksdb 事务，可以参考：https://mp.weixin.qq.com/s/4YNGrsaTTl87iXA4qXFf2w
 
 ## 悲观事务
 
-即悲观的认为存在冲突。因此在事务中的每个写操作，都会占据对应 key 的锁。如果获取不到锁，要么一直阻塞，要么超时。
+即悲观的认为存在冲突。因此在事务中的每个写操作，都会占据对应 key 的锁。如果获取不到锁，要么一直阻塞，要么超时。如果事务希望在一开始就对其之后所有的写入进行独占，可以使用 SetSnapshot 函数。这样对于悲观事务，在写操作的时候，及时获取到了锁，还会检查 key 最新的 sequence 是否 <= SetSnapshot 设置的 sequence，如果不是，则表面，在 SetSnapshot 和 写之间，该 key 发生了变更，则写操作失败。
 
 ### key 锁
 
@@ -22,7 +22,7 @@ rocksdb 维护了一个全局的锁信息，本质就是 key 到 Lock 的映射�
 
 ## 原子性
 
-类似于 etcd 的 STM 框架，rocksdb 中对于事务会维护一个 WriteBatch，存储当前事务的所有写操作，事务读取的时候也会先从 WriteBatch 读取，在最后提交的时候，才会将整个 WriteBatch 原子性的写入到 WAL 和 memtable 中。
+类似于 etcd 的 STM 框架，rocksdb 中对于事务会维护一个 WriteBatch，存储当前事务的所有写操作，事务读取的时候也会先从 WriteBatch 读取，在最后提交的时候，才会将整个 WriteBatch 原子性的写入到 WAL 和 memtable 中。参考：https://mp.weixin.qq.com/s/ia855sBLl9LEIGSW9LQ_aw
 
 ## 隔离性
 
@@ -104,14 +104,13 @@ rocks 提出了一个 MANIFEST 的概念。包括 manifest log 文件 和 一个
 
 先从 memtable 读取，如果读取不到，则从磁盘读取。首先通过 manifest 文件获取当前层每一个 SStable 的最大 key、最小 key。然后通过二分查找的方式，定位到所在的 SStable 文件，然后读取 SSTable 的 data index block，通过二分查找定位到所在的 block，然后将 block 加载到内存中，再进行二分查找，如此循环，直到查找到数据或者数据不存在。
 
-
 # 2pc
 
 rocksdb 也支持 2pc(two phased commit)。两阶段分别为：prepared + commit。
 
 - prepared
 
-    此阶段，会将变更日志存储到 WAL 中，但并会将变更写入到 memtable 中。
+    此阶段，会将变更日志存储到 WAL 中，但并会将变更写入到 memtable 中。当系统异常退出时，后续可以根据 WAL log 重建 事务为 prepared 阶段，可以继续进行提交。
 
 - commit
 
