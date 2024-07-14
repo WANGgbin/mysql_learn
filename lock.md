@@ -1,5 +1,25 @@
 本文介绍 Innodb 中的锁。
 
+#  lock 与 latch(门闩) 的区别
+
+在 innodb 中存在两种类型的锁，一种是 lock，我们常说的表级锁、行级锁属于此类，另一类是 latch，latch 更像是我们常说的锁，包括 mutex、rwlock，用来
+保护一段临界区。<br>
+
+比如对于每个 page 都会对应一个 rwlock，当 thread 访问的时候，就会根据具体的场景加 读/写 锁。当访问完页的时候，释放锁。
+
+# 锁结构
+
+为每一个 record 都维护锁，内存耗费还是很大的。<br>
+
+为此，innodb 将同一事务、同一页、相同锁类型的，多个行的锁放到一个锁结构当中，锁里面有一个 n_bits，每个 bit 通过 record 的 heap_no 跟 record 一一对应。
+如果 bit == 1，表示对应的 record 被加锁。<br>
+
+innodb 通过一个全局的 hash_table 维护所有的锁，hash_key 为(space_id + page_id).<br>
+
+当我们想判断，某个记录上是否已经有锁的时候，就先根据记录所在的页，计算一个 hash_value，然后定位到 hast_table 中的 cell，然后遍历 cell list 中
+的每一个 lock，如果 lock.page_id == cur_page_id，然后再判断 lock.n_bits 中 当前记录对应的 bit 是否为 1，如果为1，表示当前记录已经被lock
+对应的事务占有。
+
 # 表级锁
 
 ## MDL
@@ -91,3 +111,22 @@ SHOW ENGINE INNODB STATUS\G
 需要注意的时，通过上述方式只能查找到最近一次死锁的场景。如果死锁频繁发生，可以打开系统变量 `innodb_print_all_deadlocks`，这样可以在错误日志中查看所有的死锁情况了。
 
 另外，当我们打开系统变量`SET GLOBAL innodb_status_output_locks = ON;` 的时候，通过 `SHOW ENGINE INNODB STATUS\G` 可以查看每个事务详细的加锁情况(只有分配了事务 id 的事务才有记录。只有执行了增删改或者 for update 读的事务才会被分配事务 id)。
+
+# 加锁流程
+
+我们以 select ... for update; read commited 隔离级别 的执行流程来描述下 innodb 加锁的流程。<br>
+
+- 首先根据边界条件确定扫描区间
+
+在遍历 index tree 的过程中，对于每一个页我们都需要加 rwlock 的 read lock，在页访问完毕后，释放锁。最后，定位到某个叶子页。然后加 page read lock，
+然后找到第一条在扫描区间的 record。
+
+- 然后对记录加 record_not_gap_lock
+
+innodb 的所有锁都在一个 hash_table 中，我们首先在这个 hash_table 中查找，是否已经有其他事务在当前记录上加了锁，如果加了锁，当前线程阻塞，直到其他事务释放锁。
+
+- 判断是否满足条件
+
+当占锁成功后，就判断是否满足查询条件，如果不满足，直接释放锁。否则继续占有锁，直到事务提交。
+
+- 重复上述流程，直到遍历完扫描区间
