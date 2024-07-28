@@ -17,14 +17,22 @@
 
 要搞明白主备延迟的原因是什么，我们需要先弄清楚主备同步的流程是什么样的。
 
-- 主备同步流程
+### 主备同步流程
 
   - 主库执行完事务后，将变更内容写入到 bin_log
-  - 从库通过网络读取 bin_log 并写入到 relay_log(中继日志) 中
-  - 从库内部真正消费 bin_log
+  - 主库 dump_thread 发送 bin_log 给从库，从库 io_thread 将bin_log 并写入到 relay_log(中继日志) 中
+  - 从库 sql_thread 消费 bin_log
+
+为什么从库要有两个线程呢？只需要一个线程是不是就可以了，从主库读取 bin_log 然后 apply。有以下几方面原因：
+
+- 消除 master 与 slave 生产/消费速率差异，尽可能将更多的 bin_log 发送给 slave
+
+    如果是同步的方式，如果 slave 处理速度慢，导致 master 的 bin_log 无法及时发送给 slave，这个时候，如果 master 宕机了，那就会丢失很多的 bin_log 信息。而如果 slave 专门拉起一个线程
+    专门读取&保存 bin_log，这样就可以消除 master 与 slave 生产与消费的速度差异，在 master 产生的 bin_log 的时刻，就尽可能的把 bin_log 发送给 slave。然后 slave 的 sql_thread 可以
+    慢慢消费 bin_log
 
 
-- 主备延迟原因    
+### 主备延迟原因    
    
     通过分析主备同步流程，我们知道延迟的原因有以下可能：
 
@@ -146,3 +154,234 @@
   - sleep
 
     还有一种最 low 的方法就是 sleep() 一定的时间再读从库。这种方法不是很优雅，等的时间短了，数据还未同步。等的时间长了，数据可能早已同步。
+
+
+# 复制
+
+复制是为了提高 mysql 系统的高可用性，避免单点故障，同时多个从节点可以分摊读流量，提高系统整体的吞吐。
+
+## 复制原理
+
+通过 bin_log 进行同步。主库怎么知道应该从哪个位置给从库发送 bin_log 呢？<br>
+
+复制通常有两种思路，推和拉。推指的是 master 主动同步数据给 slave，这种方式 master 需要维护 slave 的复制进度。拉指的是 slave 主动从 master 拉取数据，这种方式的缺点是
+master 与 slave 同步数据不及时，且在 master 异常退出时，slave 丢失数据更多。<br>
+
+mysql 采用的是推的方式，当我们通过 change master + start slave 拉起一个 slave 的时候，slave 会主动告诉 master 从 bin log 的哪个位置开始同步数据。此后，master 中
+与该 slave 对应的 dump_thread，就会不断的 push bin_log 给 slave。<br>
+
+这里有个问题，slave 消费 bin log 的速度有可能是慢于 master 生产 bin log 的速度的，slave 如果采用单线程读取+消费 bin log 的方式，就可能导致大量的 bin log 无法及时
+从 master 发送到 slave。这样，在 master 异常退出的时候，就会有很明显的问题：大量的 bin log 的丢失。<br>
+
+为此，slave 采用 io_thread + sql_thread 的方式来解决这个问题，io_thread 专门来读取 bin_log，将 bin log 存放到 relay log 文件中，然后 sql_thread 再从 relay log 中
+消费 bin log。
+
+## 复制相关文件
+
+- master.info
+
+    保存备库连接主库所需的信息。
+
+
+## 复制拓扑
+
+### 常见的复制拓扑
+
+常见的复制拓扑有两种：
+
+- 一主多从
+
+    即一个主库多个从库。这种拓扑简单，很常见。
+
+- 互为主备的双主 + 多从
+
+    为什么要设置互为主备的双主呢？好处就是，在切主的时候，不用再通过 change master 的方式指定主库了。
+
+### 主从切换
+
+主从切换通常分为两种：
+
+- 计划中的切换
+
+    比如，要对主库所在的服务器进行升级啥的，就需要选一个新的主库。
+
+- 意外的切换
+
+    比如，主库宕机等。
+
+
+主从切换最大的难点就是：**如何获取新主库上合适的二进制日志位置，这样其他备库才可以从和老主库相同的逻辑位置开始复制。**
+
+#### 计划中切换
+
+切换流程如下：
+
+- 从库查看跟主库的同步进度
+
+    如果主从延迟很大的话，停止主库的写，从库再追上主库的时间就比较久，这样，整个服务的不可用时间就比较久。因此只有主从延迟的时间小于一个特定阈值的时候，才可以启动切换的流程。
+
+- 主库停止接受写请求
+
+    之所以停止写请求，是为了保证从库可以追上主库的进度，否则从库可能一直落后主库。<br>
+
+    停止主库写的步骤为：
+
+    - 设置 read_only
+
+        此时，服务器不再接受新的写请求。
+
+    - 杀掉还在进行中的事务
+
+        即使设置了 read_only 选项，**当前已经存在的事务可以继续提交**，因此为了真正结束所有的写入，我们 kill 掉所有打开中的事务。
+
+- 选择一个备库，然后确保备库的数据跟主库一致
+
+- 提升从库为主库
+
+    - stop slave
+    - change master to master_host = ''; reset slave;
+
+        这两条语句会断开与从库与主库的复制 tcp 连接，并且丢弃 master.info 里的信息。
+
+- 记录新主库 bin log 最新 位置
+
+    - show master status
+
+    之所以要记录该位置，是因为，后续更改让其他从库的主库指向当前库的时候，需要这个位置。
+
+- 等待其他所有从库也完全跟旧主库同步
+
+- 切换用户流量到新主库
+
+- 通过 change master 将所有其他的从库执行新的主库
+
+
+#### 意外的切换
+
+意外的切换更加复杂，复杂的原因在于：
+
+- 如果有多个从库，应该选择哪一个从库呢？
+- 主库的 bin log 可能丢失
+- 其他从库指向新的主库的时候，position 如何指定?
+
+
+我们依次看每一个问题：
+
+- 多个从库中选择新的主库
+
+我们的思路是，选择复制 bin log 最多的从库为新的主库。具体操作为：执行 show slave status 查看 Master_Log_file/ read_Master_Log_Pos，这两个参数
+的含义就是，读取 master bin log 的最新位置。
+
+
+- 主库 bin log 丢失怎么办
+
+即使设置了 sync_binlog = 1，事务提交时，虽然 bin log 落盘了，如果此时主库宕机，bin log 就会丢失。有一种方法来解决 bin log 丢失的问题：
+
+    - 采用可靠的方式存储二进制日志
+
+        相比于将二进制日志直接存储在服务器的硬盘上，将二进制日志存储在某些分布式设备上，即使主库所在的服务器无法启动，二进制日志还是在的。
+
+- 其他从库如何获取新主库的 position
+
+首先让每个从库执行完 relay log，然后通过 mysqlbinlog 工具查看最后一条事件。然后在新主库上通过 mysqlbinlog + grep 查找对应的事件即可。
+
+## 如何配置复制
+
+- 主库配置
+
+    - server id
+
+        不论是主库还是从库，一定要指定一个唯一的 server id。server id 的一个重要应用场景是：如果 bin log 中 event 的 server id 跟当前服务器的 server id 相同，则不应用该 event.
+
+    - 显示指定 log_bin 绝对路径
+
+        mysql 默认的 log_bin 文件前缀是根据服务器主机名命名的，如果服务器主机名发生变化，新生成的 bin log 文件名也会变化。这不利于 bin log 的管理。同时最好也指定一个绝对路径，
+        在所有服务器上该绝对路径最好相同，方便 bin log 管理。
+
+    - 打开 sync_binlog
+
+        避免事务提交，但 bin log 未落盘的问题。
+
+
+- 从库配置
+
+    - server id
+
+        `server_id = unique id`
+
+    - 显示指定 log_bin 绝对路径
+
+        `log_bin = /path/of/log_bin/log_bin_prefix`
+
+    - 显示指定 relay_log 绝对路径
+
+        `relay_log = /path/of/relay_log`
+
+    - 打开 log_slave_updates
+
+        `log_slave_updates = 1`
+
+    - 打开只读选项
+
+        `read_only = 1`
+
+    - 从库崩溃后，禁止重启
+
+        `skip_slave_start = 1`
+
+    - 同步刷新 master.info
+
+        从库崩溃并重启后，会根据 master.info 中的信息从主库同步 bin log，如果不同步刷新 master.info，就会消费重复的 bin log，进而导致错误的发生。因此最好打开此选项。
+
+        `sync_master_info = 1`
+
+- 从库同步 bin log
+
+    - 指定主库
+
+    ```text
+
+        CHANGE MASTER TO MASTER_HOST = 'XXXX',
+        MASTER_USER = 'XXX',
+        MASTER_PASSWORD = 'xxx',
+        MASTER_LOG_FILE = 'mysql-bin.000001',
+        MASTER_LOG_POS = 0;
+
+    ```
+
+    - 启动复制
+
+        start slave;
+
+    - 查看同步状态
+
+        start slave status;
+
+## 复制管理与维护
+
+### 主备延迟
+
+- 如何测量主备延迟
+
+    我们都知道 seconds_behind_master 表示主从延迟，那么 second_behind_master = 0 是不是就表示主从没有延迟呢？<br>
+
+    要解决这个问题，我们需要了解 second_behind_master 的计算逻辑，只有当 slave 消费 relay log 的时候，才会根据服务器当前的时间戳以及 bin log event 中
+    的时间戳计算 second_behind_master，因此，如果因为一些原因，导致从库的复制中断，那么 second_behind_master 可能一直等于 0.所以该参数不是很准确。<br>
+
+    那该如何确保主从数据一致呢？<br>
+    
+    查看主从 bin log 的最后一个 event，如果一致，则可以认为从库追赶上了主库。
+
+## 半同步特性
+
+    半同步指的是至少有一个从库接收到 bin log 后，主库才会给用户发送成功。其工作路径如下：
+
+    - 主库提交事务，发送 bin log 给从库
+
+    - 从库接收到 bin log 后(注意不是从库应用 bin log)，就发送响应给主库
+
+    - 主库接收到从库的响应，给客户端发送响应。
+
+    特别需要注意：
+
+    如果主库在一定时间内都没有接收到从库的响应，会将半同步复制转化为异步复制，继续给客户端发送成功响应。

@@ -1,1 +1,0 @@
-描述如何通过 `mysqldump` 备份 mysql 数据。
